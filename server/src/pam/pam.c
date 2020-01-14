@@ -355,6 +355,28 @@ _cmd_get_account_map(struct config  * config,
 	*reply = NULL;
 
 	pam_status_t pam_status = PAM_AUTHINFO_UNAVAIL;
+	for(int i = 0;config->auth_method[i];i++)
+    {
+        if(strcmp(config->auth_method[i],"scitokens") == 0)
+          {
+#ifdef WITH_SCITOKENS
+          const char * scitoken_requested_user = NULL;
+          pam_get_user(pam, &scitoken_requested_user, NULL);
+              if(scitoken_verify(access_token,config,scitoken_requested_user))
+              {
+            logger(LOG_TYPE_INFO,
+               "Scitoken Identity %s authorizing as a local user",
+               scitoken_requested_user);
+            pam_status = PAM_SUCCESS;
+            goto scitokencleanup;
+          }
+#else
+          logger(LOG_TYPE_INFO,
+             "Scitokens used in auth_method but not compiled with scitokens support");
+#endif //SCITOKENS
+          }
+          if(strcmp(config->auth_method[i],"globus_auth") == 0)
+          {
 	introspect = get_introspect_resource(config, access_token);
 	if (!introspect)
 	{
@@ -371,51 +393,56 @@ _cmd_get_account_map(struct config  * config,
 		goto cleanup;
 	}
 
-	if (!_is_token_valid(introspect, client))
-	{
-		*reply = _build_error_reply("INVALID_TOKEN", "Invalid token.");
-		pam_status = PAM_AUTH_ERR;
-		goto cleanup;
-	}
+		if (!_is_token_valid(introspect, client))
+		{
+			*reply = _build_error_reply("INVALID_TOKEN", "Invalid token.");
+			pam_status = PAM_AUTH_ERR;
+			goto cleanup;
+		}
 
-	pam_status = PAM_AUTHINFO_UNAVAIL;
-	identities = get_identities_resource(config, introspect);
-	if (!identities) goto cleanup;
+		pam_status = PAM_AUTHINFO_UNAVAIL;
+		identities = get_identities_resource(config, introspect);
+		if (!identities) goto cleanup;
 
-	if (!_is_session_valid(config, introspect, identities))
-	{
-		char * tmp = _build_error_reply("SESSION_VIOLATION",
-		                "The access token does not meet session requirements.");
+		if (!_is_session_valid(config, introspect, identities))
+		{
+			char * tmp = _build_error_reply("SESSION_VIOLATION",
+					"The access token does not meet session requirements.");
+			*reply = base64_encode(tmp);
+			free(tmp);
+			pam_status = PAM_AUTH_ERR;
+			goto cleanup;
+		}
+
+		account_map = account_map_init(config, identities);
+
+		char ** acct_array = _build_account_array(account_map);
+		char *  acct_list  = _build_json_list(CONST(char *,acct_array));
+		char * format = "{"
+				    "\"account_map\": {"
+					"\"permitted_accounts\": [%s]"
+				    "}"
+				"}";
+
+		char * tmp = sformat(format, acct_list?acct_list:"");
 		*reply = base64_encode(tmp);
+
+		free_array(acct_array);
+		free(acct_list);
 		free(tmp);
-		pam_status = PAM_AUTH_ERR;
-		goto cleanup;
+
+		pam_status = PAM_MAXTRIES;
+
+	cleanup:
+		client_fini(client);
+		introspect_fini(introspect);
+		identities_fini(identities);
+		account_map_fini(account_map);
+	  }
 	}
-
-	account_map = account_map_init(config, identities);
-
-	char ** acct_array = _build_account_array(account_map);
-	char *  acct_list  = _build_json_list(CONST(char *,acct_array));
-	char * format = "{"
-	                    "\"account_map\": {"
-	                        "\"permitted_accounts\": [%s]"
-	                    "}"
-	                "}";
-
-	char * tmp = sformat(format, acct_list?acct_list:"");
-	*reply = base64_encode(tmp);
-
-	free_array(acct_array);
-	free(acct_list);
-	free(tmp);
-
-	pam_status = PAM_MAXTRIES;
-
-cleanup:
-	client_fini(client);
-	introspect_fini(introspect);
-	identities_fini(identities);
-	account_map_fini(account_map);
+#ifdef WITH_SCITOKENS
+scitokencleanup:
+#endif // WITH_SCITOKENS
 	return pam_status;
 }
 
